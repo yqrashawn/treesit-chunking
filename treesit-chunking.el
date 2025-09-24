@@ -188,7 +188,8 @@ Ordered by preference - smaller, more specific nodes first.")
     (rs . rust)
     (clj . clojure)
     (cljc . clojure)
-    (cljs . clojure))
+    (cljs . clojure)
+    (el . elisp))
   "Mapping from file extensions to normalized language names.")
 
 (cl-defstruct treesit-chunking-chunk
@@ -1290,6 +1291,7 @@ ORIGINAL-BUFFER is the source buffer for LSP context."
   (or (when buffer-file-name
         (let ((ext (file-name-extension buffer-file-name)))
           (cond
+           ((equal ext '"el") 'elisp)
            ((member ext '("js" "mjs" "jsx")) 'javascript)
            ((member ext '("ts" "tsx")) 'typescript)
            ((member ext '("py" "pyw")) 'python)
@@ -1405,6 +1407,148 @@ LANGUAGE is optional and will be auto-detected if nil."
           (insert "\n\n"))))
     (pop-to-buffer buf)))
 
+;; Enhanced Symbol Extraction with Signatures
+
+(cl-defstruct treesit-chunking-symbol
+  name
+  type              ; function, macro, variable, class, interface, etc.
+  signature         ; full signature for functions/macros
+  arguments         ; list of arguments
+  return-type       ; return type if available
+  docstring         ; documentation string
+  start-line
+  end-line
+  start-pos
+  end-pos
+  namespace         ; namespace/module it belongs to
+  visibility        ; public, private, protected
+  modifiers         ; static, async, const, etc.
+  hover-info        ; LSP hover information
+  definition-location) ; file and position where defined
+
+(defvar treesit-chunking--signature-patterns
+  '((clojure . ((function . "(defn\\s-+\\([a-zA-Z_][a-zA-Z0-9_*+\\-]*\\)\\s-*\\(\\[[^\\]]*\\]\\)")
+                (macro . "(defmacro\\s-+\\([a-zA-Z_][a-zA-Z0-9_*+\\-]*\\)\\s-*\\(\\[[^\\]]*\\]\\)")
+                (variable . "(def\\s-+\\([a-zA-Z_][a-zA-Z0-9_*+\\-]*\\)")
+                (protocol . "(defprotocol\\s-+\\([a-zA-Z_][a-zA-Z0-9_*+\\-]*\\)")
+                (record . "(defrecord\\s-+\\([a-zA-Z_][a-zA-Z0-9_*+\\-]*\\)\\s-*\\(\\[[^\\]]*\\]\\)")
+                (type . "(deftype\\s-+\\([a-zA-Z_][a-zA-Z0-9_*+\\-]*\\)\\s-*\\(\\[[^\\]]*\\]\\)")
+                (namespace . "(ns\\s-+\\([a-zA-Z_][a-zA-Z0-9_.\\-]*\\)")))
+    (javascript . ((function . "function\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)\\s-*\\(([^)]*)\\)")
+                   (arrow-function . "\\(const\\|let\\|var\\)\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)\\s-*=\\s-*\\(([^)]*)\\)?\\s-*=>")
+                   (class . "class\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)")
+                   (method . "\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)\\s-*\\(([^)]*)\\)\\s-*{")
+                   (variable . "\\(const\\|let\\|var\\)\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)")
+                   (export . "export\\s-+\\(?:default\\s-+\\)?\\(?:function\\s-+\\|class\\s-+\\|\\(const\\|let\\|var\\)\\s-+\\)?\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)")))
+    (typescript . ((function . "function\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)\\s-*\\(([^)]*)\\)\\(?:\\s-*:\\s-*\\([^{]+\\)\\)?")
+                   (arrow-function . "\\(const\\|let\\|var\\)\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)\\s-*=\\s-*\\(([^)]*)\\)?\\s-*=>")
+                   (class . "class\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)")
+                   (interface . "interface\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)")
+                   (type . "type\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)\\s-*=")
+                   (method . "\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)\\s-*\\(([^)]*)\\)\\(?:\\s-*:\\s-*\\([^{]+\\)\\)?\\s-*{")
+                   (variable . "\\(const\\|let\\|var\\)\\s-+\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)")
+                   (export . "export\\s-+\\(?:default\\s-+\\)?\\(?:function\\s-+\\|class\\s-+\\|interface\\s-+\\|type\\s-+\\|\\(const\\|let\\|var\\)\\s-+\\)?\\([a-zA-Z_$][a-zA-Z0-9_$]*\\)")))
+    (python . ((function . "def\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\s-*\\(([^)]*)\\)\\(?:\\s-*->\\s-*\\([^:]+\\)\\)?:")
+               (async-function . "async\\s-+def\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\s-*\\(([^)]*)\\)\\(?:\\s-*->\\s-*\\([^:]+\\)\\)?:")
+               (class . "class\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\(?:\\s-*\\(([^)]*)\\)\\)?:")
+               (variable . "\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\s-*=")
+               (property . "@property\\s-*\\ndef\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)")))
+    (elisp . ((function . "(defun\\s-+\\([a-zA-Z_-][a-zA-Z0-9_-]*\\)\\s-*\\(([^)]*)\\)")
+              (macro . "(defmacro\\s-+\\([a-zA-Z_-][a-zA-Z0-9_-]*\\)\\s-*\\(([^)]*)\\)")
+              (variable . "(def\\(?:var\\|custom\\|const\\)\\s-+\\([a-zA-Z_-][a-zA-Z0-9_-]*\\)")
+              (advice . "(defadvice\\s-+\\([a-zA-Z_-][a-zA-Z0-9_-]*\\)")
+              (hook . "(add-hook\\s-+'\\([a-zA-Z_-][a-zA-Z0-9_-]*\\)"))))
+  "Language-specific regex patterns for extracting symbols with signatures.")
+
+(defun treesit-chunking--extract-signature-info (content pattern-type match-data language)
+  "Extract detailed signature information from CONTENT using MATCH-DATA for PATTERN-TYPE and LANGUAGE."
+  ;; Strip text properties to avoid issues
+  (setq content (substring-no-properties content))
+  (let ((name (match-string 1 content))
+        (signature nil)
+        (arguments nil)
+        (return-type nil)
+        (modifiers '()))
+
+    (pcase language
+      ('clojure
+       (when (match-string 2 content)
+         (setq signature (match-string 2 content))
+         (setq arguments (treesit-chunking--parse-clojure-args signature))))
+
+      ((or 'javascript 'typescript)
+       (when (match-string 2 content)
+         (setq signature (match-string 2 content))
+         (setq arguments (treesit-chunking--parse-js-args signature)))
+       (when (and (eq language 'typescript) (match-string 3 content))
+         (setq return-type (string-trim (match-string 3 content))))
+       ;; Extract modifiers
+       (when (string-match "\\(async\\|static\\|private\\|public\\|protected\\)" content)
+         (push (match-string 1 content) modifiers)))
+
+      ('python
+       (when (match-string 2 content)
+         (setq signature (match-string 2 content))
+         (setq arguments (treesit-chunking--parse-python-args signature)))
+       (when (match-string 3 content)
+         (setq return-type (string-trim (match-string 3 content))))
+       (when (string-match "async\\s-+def" content)
+         (push "async" modifiers)))
+
+      ('elisp
+       (when (match-string 2 content)
+         (setq signature (match-string 2 content))
+         (setq arguments (treesit-chunking--parse-elisp-args signature)))))
+
+    (list :name name
+          :signature signature
+          :arguments arguments
+          :return-type return-type
+          :modifiers modifiers)))
+
+(defun treesit-chunking--parse-clojure-args (signature)
+  "Parse Clojure function arguments from SIGNATURE."
+  (when (string-match "\\[\\([^\\]]*\\)\\]" signature)
+    (let ((args-str (match-string 1 signature)))
+      (when (> (length (string-trim args-str)) 0)
+        (mapcar #'string-trim (split-string args-str "\\s-+" t))))))
+
+(defun treesit-chunking--parse-js-args (signature)
+  "Parse JavaScript/TypeScript function arguments from SIGNATURE."
+  (when (string-match "(\\([^)]*\\))" signature)
+    (let ((args-str (match-string 1 signature)))
+      (when (> (length (string-trim args-str)) 0)
+        (mapcar (lambda (arg)
+                  (let ((trimmed (string-trim arg)))
+                    ;; Remove TypeScript type annotations
+                    (if (string-match "\\([^:]+\\):" trimmed)
+                        (string-trim (match-string 1 trimmed))
+                      trimmed)))
+                (split-string args-str "," t))))))
+
+(defun treesit-chunking--parse-python-args (signature)
+  "Parse Python function arguments from SIGNATURE."
+  (when (string-match "(\\([^)]*\\))" signature)
+    (let ((args-str (match-string 1 signature)))
+      (when (> (length (string-trim args-str)) 0)
+        (mapcar (lambda (arg)
+                  (let ((trimmed (string-trim arg)))
+                    ;; Remove type hints and default values
+                    (cond
+                     ((string-match "\\([^:=]+\\):" trimmed)
+                      (string-trim (match-string 1 trimmed)))
+                     ((string-match "\\([^=]+\\)=" trimmed)
+                      (string-trim (match-string 1 trimmed)))
+                     (t trimmed))))
+                (split-string args-str "," t))))))
+
+(defun treesit-chunking--parse-elisp-args (signature)
+  "Parse Emacs Lisp function arguments from SIGNATURE."
+  (when (string-match "(\\([^)]*\\))" signature)
+    (let ((args-str (match-string 1 signature)))
+      (when (> (length (string-trim args-str)) 0)
+        (mapcar #'string-trim (split-string args-str "\\s-+" t))))))
+
 ;; Additional LSP utilities
 
 ;;;###autoload
@@ -1466,6 +1610,83 @@ LANGUAGE is optional and will be auto-detected if nil."
     ;; Clean up: kill buffer if we created it
     (unless existing-buffer
       (kill-buffer source-buffer))))
+
+;;;###autoload
+(defun treesit-chunking-extract-symbols (&optional buffer language)
+  "Extract all symbols and their signatures from BUFFER."
+  (interactive)
+  (with-current-buffer (or buffer (current-buffer))
+    (let* ((language (or language (treesit-chunking--detect-language)))
+           (normalized-lang (treesit-chunking--normalize-language language))
+           (patterns (alist-get normalized-lang treesit-chunking--signature-patterns))
+           (symbols '()))
+
+      (when patterns
+        (save-excursion
+          (dolist (pattern-pair patterns)
+            (let ((symbol-type (car pattern-pair))
+                  (pattern (cdr pattern-pair)))
+              (goto-char (point-min))
+              (while (re-search-forward pattern nil t)
+                (let* ((symbol-name (when (match-string 1)
+                                      (substring-no-properties (match-string 1))))
+                       (signature (when (match-string 2)
+                                    (substring-no-properties (match-string 2))))
+                       (start-line (line-number-at-pos (match-beginning 0)))
+                       (end-line (line-number-at-pos (match-end 0)))
+                       (start-pos (match-beginning 0))
+                       (end-pos (match-end 0)))
+
+                  (when symbol-name
+                    (push (make-treesit-chunking-symbol
+                           :name symbol-name
+                           :type symbol-type
+                           :signature signature
+                           :start-line start-line
+                           :end-line end-line
+                           :start-pos start-pos
+                           :end-pos end-pos)
+                          symbols))))))))
+
+      ;; Remove duplicates
+      (let ((unique-symbols '()))
+        (dolist (symbol symbols)
+          (unless (cl-find-if (lambda (existing)
+                                (and (equal (treesit-chunking-symbol-name existing)
+                                            (treesit-chunking-symbol-name symbol))
+                                     (equal (treesit-chunking-symbol-type existing)
+                                            (treesit-chunking-symbol-type symbol))))
+                              unique-symbols)
+            (push symbol unique-symbols)))
+        (nreverse unique-symbols)))))
+
+;;;###autoload
+(defun treesit-chunking-symbols-demo ()
+  "Demo function to test symbol extraction on current buffer."
+  (interactive)
+  (let* ((symbols (treesit-chunking-extract-symbols))
+         (buf (get-buffer-create "*treesit-chunking-symbols-demo*")))
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert (format "Found %d symbols:\n\n" (length symbols)))
+      (dotimes (i (length symbols))
+        (let ((symbol (nth i symbols)))
+          (insert (format "=== Symbol %d ===\n" (1+ i)))
+          (insert (format "Name: %s\n" (treesit-chunking-symbol-name symbol)))
+          (insert (format "Type: %s\n" (treesit-chunking-symbol-type symbol)))
+          (insert (format "Line: %d\n" (treesit-chunking-symbol-start-line symbol)))
+          (when-let ((signature (treesit-chunking-symbol-signature symbol)))
+            (insert (format "Signature: %s\n" signature)))
+          (when-let ((args (treesit-chunking-symbol-arguments symbol)))
+            (insert (format "Arguments: %s\n" (mapconcat 'identity args ", "))))
+          (when-let ((ret-type (treesit-chunking-symbol-return-type symbol)))
+            (insert (format "Return Type: %s\n" ret-type)))
+          (when-let ((docstring (treesit-chunking-symbol-docstring symbol)))
+            (insert (format "Docstring: %s\n" (substring docstring 0 (min 100 (length docstring))))))
+          (when-let ((modifiers (treesit-chunking-symbol-modifiers symbol)))
+            (insert (format "Modifiers: %s\n" (mapconcat 'identity modifiers ", "))))
+          (insert "\n"))))
+    (pop-to-buffer buf)))
 
 (provide 'treesit-chunking)
 ;;; treesit-chunking.el ends here
