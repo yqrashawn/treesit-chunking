@@ -5,18 +5,29 @@
 ;; Author: yqrashawn <namy.19@gmail.com>
 ;; Maintainer: yqrashawn <namy.19@gmail.com>
 ;; Created: September 23, 2025
-;; Modified: September 23, 2025
-;; Version: 0.0.1
-;; Keywords: abbrev bib c calendar comm convenience data docs emulations extensions faces files frames games hardware help hypermedia i18n internal languages lisp local maint mail matching mouse multimedia news outlines processes terminals tex text tools unix vc wp
+;; Modified: September 24, 2025
+;; Version: 0.1.0
+;; Keywords: tools languages tree-sitter parsing chunking rag
 ;; Homepage: https://github.com/yqrashawn/treesit-chunking
 ;; Package-Requires: ((emacs "29.1") (lsp-mode "6.0"))
 ;;
 ;; This file is not part of GNU Emacs.
 ;;
 ;;; Commentary:
+
+;; treesit-chunking provides semantic code chunking utilities using tree-sitter.
+;; It intelligently splits source code into meaningful chunks based on AST structure,
+;; making it ideal for RAG (Retrieval-Augmented Generation) applications,
+;; code analysis, and documentation generation.
 ;;
-;;  treesit based chunking utilities
-;;
+;; Features:
+;; - Multi-language support (Clojure, JavaScript, TypeScript, Python, Elisp, etc.)
+;; - LSP integration for enhanced metadata
+;; - Symbol and dependency tracking
+;; - Fallback strategies when tree-sitter fails
+;; - Configurable chunk sizes and overlap
+;; - Complexity scoring and checksums for deduplication
+
 ;;; Code:
 
 (require 'treesit)
@@ -32,6 +43,8 @@
   "Default chunk size in characters."
   :type 'integer
   :group 'treesit-chunking)
+
+;;; Core Data Structures and Configuration
 
 ;; Enhanced Symbol and Dependency Patterns
 
@@ -105,54 +118,58 @@
               (use-package . "(use-package\\s-+\\([a-zA-Z0-9_-]+\\)"))))
   "Enhanced language-specific regex patterns for extracting dependencies.")
 
-;; Enhanced Symbol Extraction Functions
+;;; Symbol Extraction Functions
 
-(defun treesit-chunking--extract-symbols-defined (content language)
-  "Extract symbols defined in CONTENT for LANGUAGE."
+(defconst treesit-chunking--definition-types
+  '(function macro variable class interface type protocol record namespace export)
+  "Symbol types that represent definitions.")
+
+(defconst treesit-chunking--usage-types
+  '(call property attribute keyword)
+  "Symbol types that represent usage/references.")
+
+(defconst treesit-chunking--filtered-symbols
+  '("if" "when" "cond" "let" "def" "defn" "for" "while"
+    "function" "class" "const" "var" "let" "return"
+    "true" "false" "nil" "null" "undefined"
+    "String" "Number" "Object" "Array" "Boolean")
+  "Common keywords and noise to filter out from symbol extraction.")
+
+(defun treesit-chunking--extract-symbols-by-type (content language symbol-types &optional defined-symbols)
+  "Extract symbols from CONTENT for LANGUAGE matching SYMBOL-TYPES.
+If DEFINED-SYMBOLS is provided, exclude them from the results."
   (when treesit-chunking-extract-symbols
     (let ((patterns (alist-get language treesit-chunking--symbol-patterns))
-          (symbols '()))
+          (symbols '())
+          (defined-names (or defined-symbols '())))
       (when patterns
         (dolist (pattern-pair patterns)
           (let ((symbol-type (car pattern-pair))
                 (pattern (cdr pattern-pair))
                 (pos 0))
-            ;; Only extract definition patterns
-            (when (member symbol-type '(function macro variable class interface type protocol record namespace export))
+            (when (member symbol-type symbol-types)
               (while (string-match pattern content pos)
                 (let ((match (match-string (if (eq symbol-type 'arrow-function) 2 1) content)))
-                  (when (and match (not (cl-find match symbols :key (lambda (s) (plist-get s :name)) :test #'string=)))
+                  (when (and match
+                             (not (cl-find match symbols :key (lambda (s) (plist-get s :name)) :test #'string=))
+                             (not (member match defined-names))
+                             (not (member match treesit-chunking--filtered-symbols)))
                     (push (list :name match :type symbol-type) symbols)))
                 (setq pos (match-end 0)))))))
       symbols)))
 
+(defun treesit-chunking--extract-symbols-defined (content language)
+  "Extract symbols defined in CONTENT for LANGUAGE."
+  (treesit-chunking--extract-symbols-by-type content language treesit-chunking--definition-types))
+
 (defun treesit-chunking--extract-enhanced-symbols-used (content language)
   "Extract symbols used/referenced in CONTENT for LANGUAGE with enhanced tracking."
-  (when treesit-chunking-extract-symbols
-    (let ((patterns (alist-get language treesit-chunking--symbol-patterns))
-          (symbols '())
-          (defined-symbols (mapcar (lambda (s) (plist-get s :name))
-                                   (treesit-chunking--extract-symbols-defined content language))))
-      (when patterns
-        (dolist (pattern-pair patterns)
-          (let ((symbol-type (car pattern-pair))
-                (pattern (cdr pattern-pair))
-                (pos 0))
-            ;; Extract usage patterns
-            (when (member symbol-type '(call property attribute keyword))
-              (while (string-match pattern content pos)
-                (let ((match (match-string 1 content)))
-                  (when (and match
-                             (not (member match symbols))
-                             (not (member match defined-symbols))
-                             ;; Filter out common keywords and noise
-                             (not (member match '("if" "when" "cond" "let" "def" "defn" "for" "while"
-                                                  "function" "class" "const" "var" "let" "return"
-                                                  "true" "false" "nil" "null" "undefined"
-                                                  "String" "Number" "Object" "Array" "Boolean"))))
-                    (push match symbols)))
-                (setq pos (match-end 0)))))))
-      symbols)))
+  (let ((defined-symbols (mapcar (lambda (s) (plist-get s :name))
+                                 (treesit-chunking--extract-symbols-defined content language))))
+    (mapcar (lambda (s) (plist-get s :name))
+            (treesit-chunking--extract-symbols-by-type content language treesit-chunking--usage-types defined-symbols))))
+
+;;; Configuration Variables
 
 (defcustom treesit-chunking-chunk-overlap 300
   "Default chunk overlap in characters."
@@ -163,6 +180,18 @@
   "Minimum chunk size in characters."
   :type 'integer
   :group 'treesit-chunking)
+
+(defcustom treesit-chunking-extract-symbols t
+  "Whether to extract symbols defined and used in chunks."
+  :type 'boolean
+  :group 'treesit-chunking)
+
+(defcustom treesit-chunking-track-dependencies t
+  "Whether to track dependencies and imports."
+  :type 'boolean
+  :group 'treesit-chunking)
+
+;;; Language Support and Node Types
 
 (defvar treesit-chunking-splittable-node-types
   '((javascript . (function_declaration arrow_function method_definition export_statement class_declaration))
@@ -257,17 +286,7 @@ Ordered by preference - smaller, more specific nodes first.")
        (delete-dups deps)))
     (_ nil)))
 
-;; Enhanced Dependency & Import Tracking Configuration
-
-(defcustom treesit-chunking-extract-symbols t
-  "Whether to extract symbols defined and used in chunks."
-  :type 'boolean
-  :group 'treesit-chunking)
-
-(defcustom treesit-chunking-track-dependencies t
-  "Whether to track dependencies and imports."
-  :type 'boolean
-  :group 'treesit-chunking)
+;;; Dependency Extraction Functions
 
 (defun treesit-chunking--extract-enhanced-dependencies (content language)
   "Extract enhanced dependencies/imports from CONTENT for LANGUAGE with comprehensive patterns."
@@ -1271,6 +1290,8 @@ ORIGINAL-BUFFER is the source buffer for LSP context."
        (match-string 1 content)))
     ('python
      ;; Python docstrings are triple-quoted strings at function start
+
+     ;; Returns the docstring text or nil
      (cond
       ((string-match "def\\s-+[^:]+:\\s*\"\"\"\\([^\"]*\\)\"\"\"" content)
        (match-string 1 content))
