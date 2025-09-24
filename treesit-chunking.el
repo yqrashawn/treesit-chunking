@@ -651,8 +651,8 @@ ORIGINAL-BUFFER is the source buffer for context."
 (defun treesit-chunking--process-imenu-entries (imenu-index content language file-path)
   "Process IMENU-INDEX entries into chunks."
   (let ((chunks '())
-        (lines (split-string content "\\n"))
-        (total-lines (length (split-string content "\\n"))))
+        (lines (split-string content "\n"))
+        (total-lines (length (split-string content "\n"))))
 
     ;; Sort entries by position
     (let ((sorted-entries '()))
@@ -680,7 +680,7 @@ ORIGINAL-BUFFER is the source buffer for context."
                              total-lines))
                  (chunk-content (mapconcat 'identity
                                            (cl-subseq lines (1- start-line) (min end-line total-lines))
-                                           "\\n")))
+                                           "\n")))
             (when (and chunk-content
                        (> (length (string-trim chunk-content)) treesit-chunking-min-chunk-size))
               (push (make-treesit-chunking-chunk
@@ -699,7 +699,7 @@ ORIGINAL-BUFFER is the source buffer for context."
 
 (defun treesit-chunking--intelligent-line-split (content language file-path)
   "Split CONTENT using intelligent line boundary detection."
-  (let* ((lines (split-string content "\\n"))
+  (let* ((lines (split-string content "\n"))
          (boundaries (treesit-chunking--get-language-boundaries language))
          (chunks '())
          (current-chunk-lines '())
@@ -708,14 +708,14 @@ ORIGINAL-BUFFER is the source buffer for context."
 
     (dolist (line lines)
       (let ((is-boundary (treesit-chunking--line-matches-boundaries line boundaries))
-            (current-size (length (mapconcat 'identity current-chunk-lines "\\n"))))
+            (current-size (length (mapconcat 'identity current-chunk-lines "\n"))))
 
         ;; Check if we should start a new chunk
         (when (and is-boundary
                    current-chunk-lines
                    (> current-size treesit-chunking-min-chunk-size))
           ;; Create chunk from accumulated lines
-          (let ((chunk-content (mapconcat 'identity current-chunk-lines "\\n")))
+          (let ((chunk-content (mapconcat 'identity current-chunk-lines "\n")))
             (push (make-treesit-chunking-chunk
                    :content (string-trim chunk-content)
                    :start-line current-start-line
@@ -740,7 +740,7 @@ ORIGINAL-BUFFER is the source buffer for context."
         (when (and (not is-boundary)
                    (> (+ current-size (length line)) treesit-chunking-chunk-size))
           ;; Force split here
-          (let ((chunk-content (mapconcat 'identity current-chunk-lines "\\n")))
+          (let ((chunk-content (mapconcat 'identity current-chunk-lines "\n")))
             (when (> (length (string-trim chunk-content)) treesit-chunking-min-chunk-size)
               (push (make-treesit-chunking-chunk
                      :content (string-trim chunk-content)
@@ -764,7 +764,7 @@ ORIGINAL-BUFFER is the source buffer for context."
 
     ;; Handle remaining lines
     (when current-chunk-lines
-      (let ((chunk-content (mapconcat 'identity (nreverse current-chunk-lines) "\\n")))
+      (let ((chunk-content (mapconcat 'identity (nreverse current-chunk-lines) "\n")))
         (when (> (length (string-trim chunk-content)) treesit-chunking-min-chunk-size)
           (push (make-treesit-chunking-chunk
                  :content (string-trim chunk-content)
@@ -817,8 +817,8 @@ ORIGINAL-BUFFER is the source buffer for context."
 (defun treesit-chunking--add-context-to-chunks (chunks content)
   "Add context lines around CHUNKS from CONTENT."
   (when (> treesit-chunking-context-lines 0)
-    (let ((lines (split-string content "\\n"))
-          (total-lines (length (split-string content "\\n"))))
+    (let ((lines (split-string content "\n"))
+          (total-lines (length (split-string content "\n"))))
       (mapcar (lambda (chunk)
                 (let* ((start-line (treesit-chunking-chunk-start-line chunk))
                        (end-line (treesit-chunking-chunk-end-line chunk))
@@ -826,7 +826,7 @@ ORIGINAL-BUFFER is the source buffer for context."
                        (context-end (min total-lines (+ end-line treesit-chunking-context-lines)))
                        (context-content (mapconcat 'identity
                                                    (cl-subseq lines (1- context-start) context-end)
-                                                   "\\n")))
+                                                   "\n")))
                   (setf (treesit-chunking-chunk-content chunk) context-content)
                   (setf (treesit-chunking-chunk-start-line chunk) context-start)
                   (setf (treesit-chunking-chunk-end-line chunk) context-end)
@@ -849,14 +849,14 @@ ORIGINAL-BUFFER is the source buffer for context."
 
 (defun treesit-chunking--simple-line-split (content language file-path)
   "Simple line-based splitting when all else fails."
-  (let* ((lines (split-string content "\\n" t))
+  (let* ((lines (split-string content "\n" t))
          (chunks '())
          (current-chunk "")
          (current-start-line 1)
          (current-line-count 0))
 
     (dolist (line lines)
-      (let ((line-with-newline (concat line "\\n")))
+      (let ((line-with-newline (concat line "\n")))
         (if (and (> (length current-chunk) 0)
                  (> (+ (length current-chunk) (length line-with-newline))
                     treesit-chunking-chunk-size))
